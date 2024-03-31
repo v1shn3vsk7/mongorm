@@ -29,28 +29,6 @@ func (q *Query) Where(key string, cond CondOperator, value interface{}) *Query {
 	})
 
 	return q
-
-	elem := bson.E{Key: key}
-
-	// TODO: change checking for map querying
-	switch cond {
-	case EQ:
-		elem.Value = value
-	case NE:
-		elem.Value = bson.D{{Key: operators.NE, Value: value}}
-	case GT:
-		elem.Value = bson.D{{Key: operators.GT, Value: value}}
-	case GTE:
-		elem.Value = bson.D{{Key: operators.GTE, Value: value}}
-	case LT:
-		elem.Value = bson.D{{Key: operators.LT, Value: value}}
-	case LTE:
-		elem.Value = bson.D{{Key: operators.LTE, Value: value}}
-	}
-
-	q.query = append(q.query, elem)
-
-	return q
 }
 
 func (q *Query) where(key string, cond CondOperator, value interface{}) {
@@ -119,10 +97,10 @@ func (q *Query) Bson() bson.D {
 		return q.query
 	}
 
-	for _, actionF := range q.actions {
-		switch actionF.Type {
+	for _, act := range q.actions {
+		switch act.Type {
 		case action.Where:
-			q.where(actionF.Key, CondOperator(actionF.Operator), actionF.Value)
+			q.where(act.Key, CondOperator(act.Operator), act.Value)
 		case action.Or:
 			q.or()
 		case action.And:
