@@ -1,18 +1,18 @@
 package mongorm
 
-// high-level operators
+type CondOperator uint8
+
 const (
-	EQ  CondOperator = 0
-	NE  CondOperator = 1
-	GT  CondOperator = 2
-	GTE CondOperator = 3
-	LT  CondOperator = 4
-	LTE CondOperator = 5
-	In  CondOperator = 6
+	_ CondOperator = iota
+	EQ
+	NE
+	GT
+	GTE
+	LT
+	LTE
+	IN
 )
 
-type CondOperator int
-
-func (o CondOperator) Int() int {
-	return int(o)
+func (o CondOperator) Uint8() uint8 {
+	return uint8(o)
 }

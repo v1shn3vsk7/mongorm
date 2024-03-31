@@ -10,12 +10,21 @@ func Where() {
 	ctx := context.Background()
 	client, _ := mongorm.New(ctx, nil)
 
-	usersCL := client.Database("admin").Collection("users")
+	usersCL := client.Database("<database>").Collection("<collection>")
 
-	usersCL.Query().
-		Where("user_id", mongorm.EQ, "00000").
+	var userDTO struct {
+		UserID   string `bson:"user_id"`
+		Username string `bson:"user_name"`
+	}
+
+	query := usersCL.
+		Query().
+		Where("<key>", mongorm.EQ, "<value>").
 		And().
-		Where("user_name", mongorm.NE, "dolbayeb").
-		FindOne(ctx)
+		Where("<key>", mongorm.NE, "<value>")
 
+	err := usersCL.FindOne(ctx, query.Bson(), nil).Decode(&userDTO)
+	if err != nil {
+		// handle error
+	}
 }

@@ -2,28 +2,35 @@ package options
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
 	"fmt"
 	"io/ioutil"
+	"net"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/youmark/pkcs8"
-	mongo_options "go.mongodb.org/mongo-driver/mongo/options"
+	"go.mongodb.org/mongo-driver/bson/bsoncodec"
+	mongoevent "go.mongodb.org/mongo-driver/event"
+	mongooptions "go.mongodb.org/mongo-driver/mongo/options"
+	"go.mongodb.org/mongo-driver/mongo/readconcern"
+	"go.mongodb.org/mongo-driver/mongo/readpref"
+	"go.mongodb.org/mongo-driver/mongo/writeconcern"
 )
 
 type ClientOptions struct {
-	opts *mongo_options.ClientOptions
+	opts *mongooptions.ClientOptions
 }
 
 // Client creates a new ClientOptions instance.
 func Client() *ClientOptions {
 	return &ClientOptions{
-		opts: mongo_options.Client(),
+		opts: mongooptions.Client(),
 	}
 }
 
@@ -67,11 +74,70 @@ func (c *ClientOptions) SetAppName(s string) *ClientOptions {
 	return c
 }
 
+// ContextDialer is an interface that can be implemented by types that can create connections. It should be used to
+// provide a custom dialer when configuring a Client.
+//
+// DialContext should return a connection to the provided address on the given network.
+type ContextDialer interface {
+	DialContext(ctx context.Context, network, address string) (net.Conn, error)
+}
+
+// Credential can be used to provide authentication options when configuring a Client.
+//
+// AuthMechanism: the mechanism to use for authentication. Supported values include "SCRAM-SHA-256", "SCRAM-SHA-1",
+// "MONGODB-CR", "PLAIN", "GSSAPI", "MONGODB-X509", and "MONGODB-AWS". This can also be set through the "authMechanism"
+// URI option. (e.g. "authMechanism=PLAIN"). For more information, see
+// https://www.mongodb.com/docs/manual/core/authentication-mechanisms/.
+//
+// AuthMechanismProperties can be used to specify additional configuration options for certain mechanisms. They can also
+// be set through the "authMechanismProperites" URI option
+// (e.g. "authMechanismProperties=SERVICE_NAME:service,CANONICALIZE_HOST_NAME:true"). Supported properties are:
+//
+// 1. SERVICE_NAME: The service name to use for GSSAPI authentication. The default is "mongodb".
+//
+// 2. CANONICALIZE_HOST_NAME: If "true", the driver will canonicalize the host name for GSSAPI authentication. The default
+// is "false".
+//
+// 3. SERVICE_REALM: The service realm for GSSAPI authentication.
+//
+// 4. SERVICE_HOST: The host name to use for GSSAPI authentication. This should be specified if the host name to use for
+// authentication is different than the one given for Client construction.
+//
+// 4. AWS_SESSION_TOKEN: The AWS token for MONGODB-AWS authentication. This is optional and used for authentication with
+// temporary credentials.
+//
+// The SERVICE_HOST and CANONICALIZE_HOST_NAME properties must not be used at the same time on Linux and Darwin
+// systems.
+//
+// AuthSource: the name of the database to use for authentication. This defaults to "$external" for MONGODB-X509,
+// GSSAPI, and PLAIN and "admin" for all other mechanisms. This can also be set through the "authSource" URI option
+// (e.g. "authSource=otherDb").
+//
+// Username: the username for authentication. This can also be set through the URI as a username:password pair before
+// the first @ character. For example, a URI for user "user", password "pwd", and host "localhost:27017" would be
+// "mongodb://user:pwd@localhost:27017". This is optional for X509 authentication and will be extracted from the
+// client certificate if not specified.
+//
+// Password: the password for authentication. This must not be specified for X509 and is optional for GSSAPI
+// authentication.
+//
+// PasswordSet: For GSSAPI, this must be true if a password is specified, even if the password is the empty string, and
+// false if no password is specified, indicating that the password should be taken from the context of the running
+// process. For other mechanisms, this field is ignored.
+type Credential struct {
+	AuthMechanism           string
+	AuthMechanismProperties map[string]string
+	AuthSource              string
+	Username                string
+	Password                string
+	PasswordSet             bool
+}
+
 // SetAuth specifies a Credential containing options for configuring authentication. See the options.Credential
 // documentation for more information about Credential fields. The default is an empty Credential, meaning no
 // authentication will be configured.
-func (c *ClientOptions) SetAuth(auth _Credential) *ClientOptions {
-	c.opts.SetAuth(auth)
+func (c *ClientOptions) SetAuth(auth Credential) *ClientOptions {
+	c.opts.SetAuth(mongooptions.Credential(auth))
 
 	return c
 }
@@ -111,7 +177,7 @@ func (c *ClientOptions) SetConnectTimeout(d time.Duration) *ClientOptions {
 // SetDialer specifies a custom ContextDialer to be used to create new connections to the server. The default is a
 // net.Dialer with the Timeout field set to ConnectTimeout. See https://golang.org/pkg/net/#Dialer for more information
 // about the net.Dialer type.
-func (c *ClientOptions) SetDialer(d _ContextDialer) *ClientOptions {
+func (c *ClientOptions) SetDialer(d ContextDialer) *ClientOptions {
 	c.opts.SetDialer(d)
 
 	return c
@@ -185,10 +251,23 @@ func (c *ClientOptions) SetLocalThreshold(d time.Duration) *ClientOptions {
 
 // SetLoggerOptions specifies a LoggerOptions containing options for
 // configuring a logger.
-func (c *ClientOptions) SetLoggerOptions(opts *_LoggerOptions) *ClientOptions {
-	c.opts.SetLoggerOptions(opts)
+func (c *ClientOptions) SetLoggerOptions(opts *LoggerOptions) *ClientOptions {
+	c.opts.SetLoggerOptions(&mongooptions.LoggerOptions{
+		ComponentLevels:   componentLevelToMongoOpts(opts.ComponentLevels),
+		Sink:              opts.Sink,
+		MaxDocumentLength: opts.MaxDocumentLength,
+	})
 
 	return c
+}
+
+func componentLevelToMongoOpts(src map[LogComponent]LogLevel) map[mongooptions.LogComponent]mongooptions.LogLevel {
+	res := make(map[mongooptions.LogComponent]mongooptions.LogLevel, len(src))
+	for k, v := range src {
+		res[mongooptions.LogComponent(k)] = mongooptions.LogLevel(v)
+	}
+
+	return res
 }
 
 // SetMaxConnIdleTime specifies the maximum amount of time that a connection will remain idle in a connection pool
@@ -229,7 +308,7 @@ func (c *ClientOptions) SetMaxConnecting(u uint64) *ClientOptions {
 
 // SetPoolMonitor specifies a PoolMonitor to receive connection pool events. See the event.PoolMonitor documentation
 // for more information about the structure of the monitor and events that can be received.
-func (c *ClientOptions) SetPoolMonitor(m *_event.PoolMonitor) *ClientOptions {
+func (c *ClientOptions) SetPoolMonitor(m *mongoevent.PoolMonitor) *ClientOptions {
 	c.opts.SetPoolMonitor(m)
 
 	return c
@@ -237,14 +316,14 @@ func (c *ClientOptions) SetPoolMonitor(m *_event.PoolMonitor) *ClientOptions {
 
 // SetMonitor specifies a CommandMonitor to receive command events. See the event.CommandMonitor documentation for more
 // information about the structure of the monitor and events that can be received.
-func (c *ClientOptions) SetMonitor(m *_event.CommandMonitor) *ClientOptions {
+func (c *ClientOptions) SetMonitor(m *mongoevent.CommandMonitor) *ClientOptions {
 	c.opts.SetMonitor(m)
 
 	return c
 }
 
 // SetServerMonitor specifies an SDAM monitor used to monitor SDAM events.
-func (c *ClientOptions) SetServerMonitor(m *_event.ServerMonitor) *ClientOptions {
+func (c *ClientOptions) SetServerMonitor(m *mongoevent.ServerMonitor) *ClientOptions {
 	c.opts.SetServerMonitor(m)
 
 	return c
@@ -253,7 +332,7 @@ func (c *ClientOptions) SetServerMonitor(m *_event.ServerMonitor) *ClientOptions
 // SetReadConcern specifies the read concern to use for read operations. A read concern level can also be set through
 // the "readConcernLevel" URI option (e.g. "readConcernLevel=majority"). The default is nil, meaning the server will use
 // its configured default.
-func (c *ClientOptions) SetReadConcern(rc *_readconcern.ReadConcern) *ClientOptions {
+func (c *ClientOptions) SetReadConcern(rc *readconcern.ReadConcern) *ClientOptions {
 	c.opts.SetReadConcern(rc)
 
 	return c
@@ -272,14 +351,14 @@ func (c *ClientOptions) SetReadConcern(rc *_readconcern.ReadConcern) *ClientOpti
 //
 // The default is readpref.Primary(). See https://www.mongodb.com/docs/manual/core/read-preference/#read-preference for
 // more information about read preferences.
-func (c *ClientOptions) SetReadPreference(rp *_readpref.ReadPref) *ClientOptions {
+func (c *ClientOptions) SetReadPreference(rp *readpref.ReadPref) *ClientOptions {
 	c.opts.SetReadPreference(rp)
 
 	return c
 }
 
 // SetBSONOptions configures optional BSON marshaling and unmarshaling behavior.
-func (c *ClientOptions) SetBSONOptions(opts *_BSONOptions) *ClientOptions {
+func (c *ClientOptions) SetBSONOptions(opts *mongooptions.BSONOptions) *ClientOptions {
 	c.opts.SetBSONOptions(opts)
 
 	return c
@@ -287,7 +366,7 @@ func (c *ClientOptions) SetBSONOptions(opts *_BSONOptions) *ClientOptions {
 
 // SetRegistry specifies the BSON registry to use for BSON marshalling/unmarshalling operations. The default is
 // bson.DefaultRegistry.
-func (c *ClientOptions) SetRegistry(registry *_bsoncodec.Registry) *ClientOptions {
+func (c *ClientOptions) SetRegistry(registry *bsoncodec.Registry) *ClientOptions {
 	c.opts.SetRegistry(registry)
 
 	return c
@@ -427,7 +506,7 @@ func (c *ClientOptions) SetHTTPClient(client *http.Client) *ClientOptions {
 // returning (e.g. "journal=true").
 //
 // The default is nil, meaning the server will use its configured default.
-func (c *ClientOptions) SetWriteConcern(wc *_writeconcern.WriteConcern) *ClientOptions {
+func (c *ClientOptions) SetWriteConcern(wc *writeconcern.WriteConcern) *ClientOptions {
 	c.opts.SetWriteConcern(wc)
 
 	return c
@@ -455,7 +534,7 @@ func (c *ClientOptions) SetZstdLevel(level int) *ClientOptions {
 // SetAutoEncryptionOptions specifies an AutoEncryptionOptions instance to automatically encrypt and decrypt commands
 // and their results. See the options.AutoEncryptionOptions documentation for more information about the supported
 // options.
-func (c *ClientOptions) SetAutoEncryptionOptions(opts *_AutoEncryptionOptions) *ClientOptions {
+func (c *ClientOptions) SetAutoEncryptionOptions(opts *mongooptions.AutoEncryptionOptions) *ClientOptions {
 	c.opts.SetAutoEncryptionOptions(opts)
 
 	return c
@@ -479,7 +558,7 @@ func (c *ClientOptions) SetDisableOCSPEndpointCheck(disableCheck bool) *ClientOp
 // SetServerAPIOptions specifies a ServerAPIOptions instance used to configure the API version sent to the server
 // when running commands. See the options.ServerAPIOptions documentation for more information about the supported
 // options.
-func (c *ClientOptions) SetServerAPIOptions(opts *_ServerAPIOptions) *ClientOptions {
+func (c *ClientOptions) SetServerAPIOptions(opts *mongooptions.ServerAPIOptions) *ClientOptions {
 	c.opts.SetServerAPIOptions(opts)
 
 	return c
@@ -654,6 +733,6 @@ func extractX509UsernameFromSubject(subject string) string {
 	return strings.Join(pairs, ",")
 }
 
-func (c *ClientOptions) MongoOptions() *mongo_options.ClientOptions {
+func (c *ClientOptions) MongoOptions() *mongooptions.ClientOptions {
 	return c.opts
 }
