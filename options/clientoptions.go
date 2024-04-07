@@ -21,10 +21,13 @@ import (
 	"go.mongodb.org/mongo-driver/mongo/readconcern"
 	"go.mongodb.org/mongo-driver/mongo/readpref"
 	"go.mongodb.org/mongo-driver/mongo/writeconcern"
+
+	"github.com/v1shn3vsk7/mongorm/internal/tools"
 )
 
 type ClientOptions struct {
-	opts *mongooptions.ClientOptions
+	opts          *mongooptions.ClientOptions
+	externalTools *tools.ExternalTools
 }
 
 // Client creates a new ClientOptions instance.
@@ -731,6 +734,16 @@ func extractX509UsernameFromSubject(subject string) string {
 	}
 
 	return strings.Join(pairs, ",")
+}
+
+func (c *ClientOptions) SetCaching(ctx context.Context, key any, TTL, cleanup time.Duration) *ClientOptions {
+	if c.externalTools == nil {
+		c.externalTools = &tools.ExternalTools{}
+	}
+
+	c.externalTools.CreateCache(ctx, key, TTL, cleanup)
+
+	return c
 }
 
 func (c *ClientOptions) MongoOptions() *mongooptions.ClientOptions {
